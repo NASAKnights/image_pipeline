@@ -100,6 +100,13 @@ ImagePublisher::ImagePublisher(const rclcpp::NodeOptions & options)
       return result;
     };
   on_set_parameters_callback_handle_ = this->add_on_set_parameters_callback(param_change_callback);
+  timeout_ = this->get_parameter("timeout").as_int();
+  flip_horizontal_ = this->get_parameter("flip_horizontal").as_bool();
+  flip_vertical_ = this->get_parameter("flip_vertical").as_bool();
+  frame_id_ = this->get_parameter("frame_id").as_string();
+  publish_rate_ = this->get_parameter("publish_rate").as_double();
+  camera_info_url_ = this->get_parameter("camera_info_url").as_string();
+  ImagePublisher::onInit();
 }
 
 void ImagePublisher::reconfigureCallback()
@@ -165,13 +172,19 @@ void ImagePublisher::onInit()
     if (image_.empty()) {  // if filename not exist, open video device
       try {  // if filename is number
         int num = std::stoi(filename_);  // num is 1234798797
+        cap_ = cv::VideoCapture(num, cv::CAP_V4L2);
         cap_.open(num);
       } catch (const std::invalid_argument &) {  // if file name is string
+        cap_ = cv::VideoCapture(std::string("v4l2src device=") + filename_ + " ! jpegdec");
         cap_.open(filename_);
       }
       CV_Assert(cap_.isOpened());
       cap_.read(image_);
       cap_.set(cv::CAP_PROP_POS_FRAMES, 0);
+      int codec = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+      cap_.set(cv::CAP_PROP_FOURCC, codec);
+      cap_.set(cv::CAP_PROP_FPS, publish_rate_);
+
     }
     CV_Assert(!image_.empty());
   } catch (cv::Exception & e) {
@@ -206,16 +219,32 @@ void ImagePublisher::onInit()
   } else {
     flip_image_ = false;
   }
+  camera_info_manager::CameraInfoManager c(this);
+  if (!camera_info_url_.empty()) {
+    RCLCPP_INFO(get_logger(), "camera_info_url exist");
+    try {
+      c.validateURL(camera_info_url_);
+      c.loadCameraInfo(camera_info_url_);
+      camera_info_ = c.getCameraInfo();
+    } catch (cv::Exception & e) {
+      RCLCPP_ERROR(
+        this->get_logger(), "camera calibration failed to load: %s %s %s %i",
+        e.err.c_str(), e.func.c_str(), e.file.c_str(), e.line);
+    }
+  } 
+  else {
 
-  camera_info_.width = image_.cols;
-  camera_info_.height = image_.rows;
-  camera_info_.distortion_model = "plumb_bob";
-  camera_info_.d = {0, 0, 0, 0, 0};
-  camera_info_.k = {1, 0, static_cast<float>(camera_info_.width / 2), 0, 1,
-    static_cast<float>(camera_info_.height / 2), 0, 0, 1};
-  camera_info_.r = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-  camera_info_.p = {1, 0, static_cast<float>(camera_info_.width / 2), 0, 0, 1,
-    static_cast<float>(camera_info_.height / 2), 0, 0, 0, 1, 0};
+    RCLCPP_INFO(get_logger(), "no camera_info_url exist");
+    camera_info_.width = image_.cols;
+    camera_info_.height = image_.rows;
+    camera_info_.distortion_model = "plumb_bob";
+    camera_info_.d = {0, 0, 0, 0, 0};
+    camera_info_.k = {1, 0, static_cast<float>(camera_info_.width / 2), 0, 1,
+      static_cast<float>(camera_info_.height / 2), 0, 0, 1};
+    camera_info_.r = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    camera_info_.p = {1, 0, static_cast<float>(camera_info_.width / 2), 0, 0, 1,
+      static_cast<float>(camera_info_.height / 2), 0, 0, 0, 1, 0};
+  }
 
   timer_ = this->create_wall_timer(
     std::chrono::milliseconds(static_cast<int>(1000 / publish_rate_)),
